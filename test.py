@@ -85,12 +85,19 @@ def kNN(epoch, net, lemniscate, trainloader, testloader, K, sigma, recompute_mem
         transform_bak = trainloader.dataset.transform
         trainloader.dataset.transform = testloader.dataset.transform
         temploader = torch.utils.data.DataLoader(trainloader.dataset, batch_size=100, shuffle=False, num_workers=1)
+        # for batch_idx, (inputs, targets, indexes) in enumerate(temploader):
+        #     targets = targets.to(device)
+        #     batchSize = inputs.size(0)
+        #     features = net(inputs.to(device))
+        #     trainFeatures[:, batch_idx*batchSize:batch_idx*batchSize+batchSize] = features.data.t()
+        trainFeatures = torch.empty(0, args.low_dim).to(device)
         for batch_idx, (inputs, targets, indexes) in enumerate(temploader):
             targets = targets.to(device)
             batchSize = inputs.size(0)
             features = net(inputs.to(device))
-            trainFeatures[:, batch_idx*batchSize:batch_idx*batchSize+batchSize] = features.data.t()
-        trainLabels = torch.LongTensor(temploader.dataset.train_labels).to(device)
+            trainFeatures = torch.cat([trainFeatures, features.data])
+        trainFeatures = trainFeatures.t()
+        trainLabels = torch.LongTensor(temploader.dataset.targets).to(device)
         trainloader.dataset.transform = transform_bak
     
     top1 = 0.
