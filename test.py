@@ -13,7 +13,7 @@ def NN(epoch, net, lemniscate, trainloader, testloader, recompute_memory=0):
     correct = 0.
     total = 0
     testsize = testloader.dataset.__len__()
-    device = 'cuda:5' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     trainFeatures = lemniscate.memory.t()
     if hasattr(trainloader.dataset, 'imgs'):
@@ -71,7 +71,7 @@ def kNN(epoch, net, lemniscate, trainloader, testloader, K, sigma, recompute_mem
     cls_time = AverageMeter()
     total = 0
     testsize = testloader.dataset.__len__()
-    device = 'cuda:5' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     trainFeatures = lemniscate.memory.t()
     

@@ -46,7 +46,7 @@ parser.add_argument('--nce-m', default=0.5, type=float,
 args = parser.parse_args()
 
 if __name__ == '__main__':
-    device = 'cuda:5' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     best_acc = 0  # best test accuracy
     start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
