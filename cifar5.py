@@ -13,7 +13,8 @@ import torchvision.transforms as transforms
 import lib.custom_transforms as custom_transforms
 
 #modified
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, SpectralClustering
+import pandas as pd
 
 import os
 import argparse
@@ -71,6 +72,19 @@ if __name__ == '__main__':
     testset = datasets.CIFAR10Instance(root='./data', train=False, download=True, transform=transform_test)
     testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=1)
 
+    # trainloader = torch.utils.data.DataLoader(torchvision.datasets.MNIST('./data', train=True, download=True,
+    #                                            transform=torchvision.transforms.Compose([
+    #                                            torchvision.transforms.ToTensor(),
+    #                                            torchvision.transforms.Normalize((0.1307,), (0.3081,))])),
+    #                                            batch_size=batch_size_train, shuffle=True)
+    
+    # testloader = torch.utils.data.DataLoader(torchvision.datasets.MNIST('./data', train=False, download=True,
+    #                                           transform=torchvision.transforms.Compose([
+    #                                           torchvision.transforms.ToTensor(),
+    #                                           torchvision.transforms.Normalize((0.1307,), (0.3081,))])),
+    #                                           batch_size=batch_size_test, shuffle=True)
+
+
     classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
     ndata = trainset.__len__()
 
@@ -84,9 +98,8 @@ if __name__ == '__main__':
             self.fc2 = nn.Linear(64, 10)
 
         def forward(self, x):
-            x = F.softmax(self.fc2(F.relu(self.fc1(x))))
-            # print(x.shape)
-            # print(x.sum(dim=0))
+            x = self.fc2(F.relu(self.fc1(x)))
+
             return x
 
     net = models.__dict__['ResNet18'](low_dim=args.low_dim)
@@ -133,7 +146,7 @@ if __name__ == '__main__':
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     optimizer2 = optim.Adam(net2.parameters(), weight_decay=5e-4)
 
-    deepcluster = KMeans(n_clusters=10, algorithm="full", n_init=20)
+
     temploader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=False, drop_last=False, num_workers=8)
     alpha = 0.5
 
@@ -194,8 +207,10 @@ if __name__ == '__main__':
                   'Loss: {train_loss.val:.4f} ({train_loss.avg:.4f})'.format(
                   epoch, batch_idx, len(trainloader), batch_time=batch_time, data_time=data_time, train_loss=train_loss))
 
+    acc_log = []
     for epoch in range(start_epoch, start_epoch+200):
         # get all features
+        print('Getting Features')
         trainFeatures = torch.empty(0, args.low_dim).to(device)  
         for batch_idx, (inputs, targets, indexes) in enumerate(temploader):
             targets = targets.to(device)
@@ -203,13 +218,18 @@ if __name__ == '__main__':
             features = net(inputs.to(device))
             trainFeatures = torch.cat([trainFeatures, features.data])
 
+        print('Clustering the Features')
+        # deepcluster = KMeans(n_clusters=10, algorithm="full", n_init=20)
+        deepcluster = SpectralClustering(n_clusters=10, n_init=20)
         cluster = deepcluster.fit(trainFeatures.to('cpu'))
         pseudoLabel = cluster.labels_
         # clusterLoss = cluster.inertia_
 
+        print('Training network')
         train(epoch, pseudoLabel)
 
         acc = kNN(epoch, net, lemniscate, trainloader, testloader, 200, args.nce_t, 0)
+        acc_log.append(acc)
 
         if acc > best_acc:
             print('Saving..')
@@ -226,5 +246,6 @@ if __name__ == '__main__':
 
         print('best accuracy: {:.2f}'.format(best_acc*100))
 
-    acc = kNN(0, net, lemniscate, trainloader, testloader, 200, args.nce_t, 1)
+    pd.DataFrame(acc_log).to_csv('acc_log.csv')
+    # acc = kNN(0, net, lemniscate, trainloader, testloader, 200, args.nce_t, 1)
     print('last accuracy: {:.2f}'.format(acc*100))
