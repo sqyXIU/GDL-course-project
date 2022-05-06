@@ -13,12 +13,12 @@ import torchvision.transforms as transforms
 import lib.custom_transforms as custom_transforms
 
 #modified
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import KMeans, SpectralClustering
+import pandas as pd
 
 import os
 import argparse
 import time
-import random
 
 import models
 import datasets
@@ -42,16 +42,11 @@ parser.add_argument('--nce-t', default=0.1, type=float,
                     metavar='T', help='temperature parameter for softmax')
 parser.add_argument('--nce-m', default=0.5, type=float,
                     metavar='M', help='momentum for non-parametric updates')
-#modified
-parser.add_argument('--cl-n', default=1000, type=int,
-                    metavar='N', help='number of cluster reduce in clustering')
-parser.add_argument('--cl-p', default=0.01, type=float,
-                    metavar='P', help='probability cluster drop out in clustering')
 
 args = parser.parse_args()
 
 if __name__ == '__main__':
-    device = 'cuda:5' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     best_acc = 0  # best test accuracy
     start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
@@ -71,17 +66,44 @@ if __name__ == '__main__':
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
-    trainset = datasets.CIFAR10Instance(root='./data', train=True, download=True, transform=transform_train)
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=1)
+    # trainset = datasets.CIFAR10Instance(root='./data', train=True, download=True, transform=transform_train)
+    # trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=1)
 
-    testset = datasets.CIFAR10Instance(root='./data', train=False, download=True, transform=transform_test)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=1)
+    # testset = datasets.CIFAR10Instance(root='./data', train=False, download=True, transform=transform_test)
+    # testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=1)
+
+    trainloader = torch.utils.data.DataLoader(torchvision.datasets.MNIST('./data', train=True, download=True,
+                                               transform=torchvision.transforms.Compose([
+                                               torchvision.transforms.ToTensor(),
+                                               torchvision.transforms.Normalize((0.1307,), (0.3081,))])),
+                                               batch_size=batch_size_train, shuffle=True)
+    
+    testloader = torch.utils.data.DataLoader(torchvision.datasets.MNIST('./data', train=False, download=True,
+                                              transform=torchvision.transforms.Compose([
+                                              torchvision.transforms.ToTensor(),
+                                              torchvision.transforms.Normalize((0.1307,), (0.3081,))])),
+                                              batch_size=batch_size_test, shuffle=True)
+
 
     classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
     ndata = trainset.__len__()
 
     print('==> Building model..')
+
+    # modified: classifier
+    class Classifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc1 = nn.Linear(128, 64)
+            self.fc2 = nn.Linear(64, 10)
+
+        def forward(self, x):
+            x = self.fc2(F.relu(self.fc1(x)))
+
+            return x
+
     net = models.__dict__['ResNet18'](low_dim=args.low_dim)
+    net2 = Classifier()
     # define leminiscate
     if args.nce_k > 0:
         lemniscate = NCEAverage(args.low_dim, ndata, args.nce_k, args.nce_t, args.nce_m)
@@ -109,15 +131,24 @@ if __name__ == '__main__':
     else:
         criterion = nn.CrossEntropyLoss()
 
+    criterion2 = nn.CrossEntropyLoss()
+
     net.to(device)
+    net2.to(device)
     lemniscate.to(device)
     criterion.to(device)
+    criterion2.to(device)
 
     if args.test_only:
         acc = kNN(0, net, lemniscate, trainloader, testloader, 200, args.nce_t, 1)
         sys.exit(0)
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+    optimizer2 = optim.Adam(net2.parameters(), weight_decay=5e-4)
+
+
+    temploader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=False, drop_last=False, num_workers=8)
+    alpha = 0.5
 
     def adjust_learning_rate(optimizer, epoch):
         """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
@@ -129,7 +160,7 @@ if __name__ == '__main__':
             param_group['lr'] = lr
 
     # Training
-    def train(epoch):
+    def train(epoch, pseudoLabel):
         print('\nEpoch: %d' % epoch)
         adjust_learning_rate(optimizer, epoch)
         train_loss = AverageMeter()
@@ -140,42 +171,65 @@ if __name__ == '__main__':
 
         # switch to train mode
         net.train()
+        net2.train()
 
         end = time.time()
         for batch_idx, (inputs, targets, indexes) in enumerate(trainloader):
             data_time.update(time.time() - end)
-            # modified
-            indexes.apply_(mapping.get)
-            inputs, targets, indexes = inputs.to(device), targets.to(device), indexes.to(device)
-            
+
+            pseudolabels = torch.Tensor(pseudoLabel[indexes]).type(torch.LongTensor)
+            inputs, targets, indexes, pseudolabels = inputs.to(device), targets.to(device), indexes.to(device), pseudolabels.to(device)
             optimizer.zero_grad()
+            optimizer2.zero_grad()
 
             features = net(inputs)
-            outputs = lemniscate(features, indexes)
-            loss = criterion(outputs, indexes)
 
+            outputs = lemniscate(features, indexes)
+            outputs2 = net2(features)
+
+            loss1 = criterion(outputs, indexes)
+            loss2 = criterion2(outputs2, pseudolabels) # each epoch different pseudo labels
+            loss = alpha * loss1 + (1 - alpha) * loss2
+            
             loss.backward()
             optimizer.step()
+            optimizer2.step()
 
             train_loss.update(loss.item(), inputs.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
-
+            print('loss2', loss2.item())
             print('Epoch: [{}][{}/{}]'
                   'Time: {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                   'Data: {data_time.val:.3f} ({data_time.avg:.3f}) '
                   'Loss: {train_loss.val:.4f} ({train_loss.avg:.4f})'.format(
                   epoch, batch_idx, len(trainloader), batch_time=batch_time, data_time=data_time, train_loss=train_loss))
 
-    # modified
-    mapping = dict(zip(range(len(trainset)),range(len(trainset))))
-    temploader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=False, num_workers=1)
-
+    acc_log = []
     for epoch in range(start_epoch, start_epoch+200):
-        train(epoch)
+        # get all features
+        print('Getting Features')
+        trainFeatures = torch.empty(0, args.low_dim).to(device)  
+        for batch_idx, (inputs, targets, indexes) in enumerate(temploader):
+            targets = targets.to(device)
+            batchSize = inputs.size(0)
+            features = net(inputs.to(device))
+            trainFeatures = torch.cat([trainFeatures, features.data])
+
+        print('Clustering the Features')
+        # deepcluster = KMeans(n_clusters=10, algorithm="full", n_init=20)
+        deepcluster = SpectralClustering(n_clusters=10, n_init=20)
+        cluster = deepcluster.fit(trainFeatures.to('cpu'))
+        pseudoLabel = cluster.labels_
+        # clusterLoss = cluster.inertia_
+
+        print('Training network')
+        train(epoch, pseudoLabel)
+
         acc = kNN(epoch, net, lemniscate, trainloader, testloader, 200, args.nce_t, 0)
+        acc_log.append(acc)
 
         if acc > best_acc:
             print('Saving..')
@@ -192,59 +246,6 @@ if __name__ == '__main__':
 
         print('best accuracy: {:.2f}'.format(best_acc*100))
 
-        # modified
-        if epoch % 3 == 0 :
-            # get inverse mapping
-            t1 = time.time()
-            inv_map = {}
-            for k, v in mapping.items():
-                inv_map[v] = inv_map.setdefault(v, []) + [k]
-            inv_map = dict(sorted(inv_map.items()))
-            t2 = time.time()
-            # get all features
-            trainFeatures = torch.zeros(len(trainset), args.low_dim).to(device)
-            
-            for batch_idx, (inputs, targets, indexes) in enumerate(temploader):
-                targets = targets.to(device)
-                batchSize = inputs.size(0)
-                features = net(inputs.to(device))
-                trainFeatures[batch_idx*batchSize:batch_idx*batchSize+batchSize, :] = features.data
-
-            # generate n_i
-            t3 = time.time()
-            print("train feature shape : ", trainFeatures.shape)
-            trainFeature_ni = torch.zeros(len(inv_map), args.low_dim)
-            print("train feature ni shape : ", trainFeature_ni.shape)
-            for cluster_idx, feature_idx in inv_map.items():
-                trainFeature_ni[cluster_idx, :] = torch.mean(trainFeatures[feature_idx, :], axis=0)
-
-            t4 = time.time()
-            # get new cluster index
-            cluster_ni = len(trainFeature_ni) - args.cl_n
-            new_cluster = AgglomerativeClustering(n_clusters=cluster_ni).fit(trainFeature_ni).labels_
-            t5 = time.time()
-            # update_mapping
-            for k, v in inv_map.items():
-                for i in v:
-                    # if random.uniform(0, 1) > args.cl_p:
-                    mapping[i] = new_cluster[k]
-                    # else:
-                    #     mapping[i] = cluster_ni
-                    #     cluster_ni += 1
-            t6 = time.time()
-            # update non parametric softmax
-            if args.nce_k > 0:
-                lemniscate = NCEAverage(args.low_dim, cluster_ni, args.nce_k, args.nce_t, args.nce_m)
-            else:
-                lemniscate = LinearAverage(args.low_dim, cluster_ni, args.nce_t, args.nce_m)
-
-            lemniscate.to(device)
-
-            print("inverse mapping : ", t2 - t1)
-            print("get features : ", t3 - t2)
-            print("generate ni : ", t4 - t3)
-            print("clustering : ", t5 - t4)
-            print("update mapping with drop out: ", t6 - t5)
-
-    acc = kNN(0, net, lemniscate, trainloader, testloader, 200, args.nce_t, 1)
+    pd.DataFrame(acc_log).to_csv('acc_log.csv')
+    # acc = kNN(0, net, lemniscate, trainloader, testloader, 200, args.nce_t, 1)
     print('last accuracy: {:.2f}'.format(acc*100))
